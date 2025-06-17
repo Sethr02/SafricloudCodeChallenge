@@ -31,34 +31,40 @@ export class JobQueue {
             throw new Error('Queue has been disposed');
         }
         const queueStartTime = Date.now();
-        await this.enforceRateLimit();
         return new Promise((resolve, reject) => {
             const job = async () => {
-                const startTime = Date.now();
-                const queueTime = startTime - queueStartTime;
-                try {
-                    const result = await Promise.race([
-                        fn(...args),
-                        new Promise((_, timeoutReject) => setTimeout(() => timeoutReject(new Error('Job timed out')), this.timeoutLimit)),
-                    ]);
-                    const executionTime = Date.now() - startTime;
-                    resolve({
-                        result,
-                        queueTime,
-                        executionTime,
-                    });
-                }
-                catch (error) {
-                    reject(error);
-                }
-                finally {
-                    this.activeJobs--;
-                    this.processNextJob();
-                }
+                await this.enforceRateLimit();
+                await this.executeJob(fn, args, queueStartTime, resolve, reject);
             };
             this.queue.push({ resolve, reject, job });
             this.processNextJob();
         });
+    }
+    async executeJob(fn, args, queueStartTime, resolve, reject) {
+        const startTime = Date.now();
+        const queueTime = startTime - queueStartTime;
+        try {
+            const result = await this.executeWithTimeout(fn, args);
+            const executionTime = Date.now() - startTime;
+            resolve({
+                result,
+                queueTime,
+                executionTime,
+            });
+        }
+        catch (error) {
+            reject(error);
+        }
+        finally {
+            this.activeJobs--;
+            this.processNextJob();
+        }
+    }
+    async executeWithTimeout(fn, args) {
+        return Promise.race([
+            fn(...args),
+            new Promise((_, timeoutReject) => setTimeout(() => timeoutReject(new Error('Job timed out')), this.timeoutLimit)),
+        ]);
     }
     // Makes sure we don't start too many jobs too quickly
     // Waits if needed to stay under the rate limit
@@ -82,14 +88,12 @@ export class JobQueue {
         if (this.queue.length === 0 || this.activeJobs >= this.concurrencyLimit) {
             return;
         }
-        while (this.queue.length > 0 && this.activeJobs < this.concurrencyLimit) {
-            const next = this.queue.shift();
-            if (next) {
-                this.activeJobs++;
-                next.job().catch((error) => {
-                    console.error('Job execution failed:', error);
-                });
-            }
+        const next = this.queue.shift();
+        if (next) {
+            this.activeJobs++;
+            next.job().catch((error) => {
+                console.error('Job execution failed:', error);
+            });
         }
     }
     // Counter for how many jobs are waiting in line
